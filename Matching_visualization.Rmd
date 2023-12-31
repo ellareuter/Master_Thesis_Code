@@ -1,0 +1,292 @@
+---
+title: "Matching_visualization"
+author: "Ella Reuter"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+### Libraries
+library(sf)
+library(sp)
+library(arrow)
+library(stringr)
+library(dplyr)
+library(tidyr)
+library(units)
+library(purrr)
+library(osmdata)
+library(RColorBrewer)
+library(ggplot2)
+library(rnaturalearth)
+library(viridis)
+library(ggrepel)
+library(maps)
+library(ggmap)
+library(leaflet)
+```
+
+### Data loading
+
+```{r}
+#read the data
+df_pv <- arrow::read_parquet("~/Desktop/Masterarbeit/data/export_benetza_pv.parquet")
+parking_lots <- st_read("~/Desktop/Masterarbeit/data/osm_parking_areas_in_germany.gpkg")
+```
+
+
+### Data Cleaning and Preparation
+
+```{r}
+# Renaming columns and converting data types
+pv_installations <- df_pv %>%
+  select(
+    MaStR_Nr = `MaStR-Nr. der Einheit`, 
+    Latitude = `Koordinate: Breitengrad (WGS84)`, 
+    Longitude = `Koordinate: Längengrad (WGS84)`
+  ) %>%
+  mutate(
+    Latitude = as.numeric(str_replace(Latitude, ",", ".")),
+    Longitude = as.numeric(str_replace(Longitude, ",", "."))
+  )
+```
+
+```{r}
+# Converting the cleaned data into an sf object with appropriate CRS.
+pv_installations <- st_as_sf(pv_installations, coords = c("Longitude", "Latitude"), crs = 4326) %>%
+  st_transform(crs = 32632) 
+```
+
+```{r}
+# Ensure that parking lots data is in the same coordinate reference system
+gdf_parking_lots <- st_transform(parking_lots, 32632)
+```
+
+
+### Deviding parking data into 10 subsets
+```{r}
+# Number of parts to split into
+num_parts <- 10
+```
+
+```{r}
+# Create a sequence of numbers from 1 to num_parts
+partition_ids <- (seq_len(nrow(gdf_parking_lots)) - 1) %% num_parts + 1
+```
+
+```{r}
+# Split the dataframe into a list of dataframes based on partition_ids
+split_parking_data <- split(gdf_parking_lots, partition_ids)
+```
+
+```{r}
+gdf_parking_1 <- split_parking_data[[1]]
+```
+
+```{r}
+gdf_parking_lots <- gdf_parking_1
+```
+
+### K-means Clustering of Parking lots
+
+```{r}
+### Data Cleaning and Preparation
+num_clusters_pl <- 1000
+```
+
+```{r}
+gdf_parking_lots_centroids <- st_centroid(gdf_parking_lots$geom)
+```
+
+```{r}
+# Run k-means on the coordinates
+set.seed(123)
+coordinates_pl <- st_coordinates(gdf_parking_lots_centroids)
+kmeans_result_parking_lots <- kmeans(coordinates_pl, centers = num_clusters_pl)
+```
+
+```{r}
+# Add the cluster number to the original PV installations data
+gdf_parking_lots$cluster <- kmeans_result_parking_lots$cluster 
+```
+
+### Compute Cluster Information
+```{r}
+# Compute cluster information 
+cluster_info <- gdf_parking_lots %>% 
+  group_by(cluster) %>% 
+  summarise(
+    centroid = st_centroid(st_union(geom)),
+    radius = max(st_distance(geom, st_centroid(st_union(geom)))),
+    count = n(),
+    .groups = 'keep'  
+  )
+```
+
+```{r}
+# Maximum Distance
+max_distance <- set_units(500, "meters") 
+```
+
+```{r}
+city_coords_from_op_str_map <- function(city_name){
+  city_coordinates <- osmdata::getbb(city_name) %>% 
+    t() %>% 
+    data.frame() %>% 
+    sf::st_as_sf(coords = c("x", "y")) %>%  
+    sf::st_bbox() %>% 
+    sf::st_as_sfc() %>% 
+    sf::st_as_sf() %>% 
+    sf::`st_crs<-`(4326) 
+  
+  city_coordinates %>% 
+    dplyr::mutate(name_of_city = city_name) %>% 
+    dplyr::rename(geometry = x) %>% 
+    dplyr::relocate(name_of_city, geometry) %>% 
+    return()
+}
+```
+
+```{r}
+munich <- city_coords_from_op_str_map("Munich")
+```
+
+```{r}
+munich <- st_transform(munich, 4326)
+```
+
+```{r}
+munich_sfc <- st_transform(munich, 32632)
+```
+
+```{r}
+munich_sfc <- st_as_sfc(munich)
+```
+
+```{r}
+# Calculate intersections
+intersections <- st_intersects(cluster_info$centroid, munich_sfc)
+```
+
+```{r}
+# Create a logical vector indicating whether each centroid intersects with munich_sfc
+is_in_munich <- lengths(intersections) > 0
+
+# Subset cluster_info to include only those clusters that intersect with munich_sfc
+munich_clusters <- cluster_info[is_in_munich, ]
+```
+
+```{r}
+# Transform the centroids to WGS84 
+munich_clusters <- st_transform(munich_clusters, 4326)
+```
+
+```{r}
+# sf object containing the polygon for Munich
+munich_bbox <- st_bbox(munich)
+```
+
+```{r}
+# Filter the dataframe for points within the Munich bounding box
+df_munich_pv <- pv_installations %>%
+  filter(
+    between(Longitude, munich_bbox["xmin"], munich_bbox["xmax"]) &
+    between(Latitude, munich_bbox["ymin"], munich_bbox["ymax"])
+  )
+```
+
+```{r}
+# Convert the dataframe to a simple feature (sf) object with CRS specified
+df_munich_pv <- st_as_sf(df_munich_pv, coords = c("Longitude", "Latitude"), crs = 4326)
+```
+
+```{r}
+# Set the CRS of munich_clusters and df_munich_pv to EPSG:4326
+st_crs(munich_clusters) <- st_crs(4326)
+st_crs(df_munich_pv) <- st_crs(4326)
+```
+
+```{r}
+# Create a leaflet map with options for finer zoom control
+map <- leaflet(options = leafletOptions(zoomSnap = 0.1, zoomDelta = 0.1)) %>%
+  addTiles() %>%
+  setView(
+    lng = mean(c(munich_bbox["xmin"], munich_bbox["xmax"])),
+    lat = mean(c(munich_bbox["ymin"], munich_bbox["ymax"])),
+    zoom = 12
+  )
+```
+
+```{r}
+# Create a transparent circle layer with a gray outline
+map <- map %>%
+  addCircles(data = df_munich_pv,
+             radius = 500,
+             fill = FALSE,
+             color = "#808080", 
+             weight = 2,  
+             opacity = 1)
+```
+
+```{r}
+# Add a colored marker layer for PV installations
+map <- map %>%
+  addCircleMarkers(data = df_munich_pv,
+                   color = "#808080",
+                   fillOpacity = 1,  
+                   opacity = 1,
+                   radius = 3,
+                   popup = ~paste("PV Installation"))
+```
+
+```{r}
+# Add a colored cluster center
+map <- map %>%
+  addCircleMarkers(data = munich_clusters,
+                   color = "yellow",
+                   fillOpacity = 1,  
+                   opacity = 1,      
+                   radius = 2,
+                   popup = ~paste("Cluster"))
+```
+
+```{r}
+# Create a transparent circle layer with a blue outline for clusters
+for (i in 1:nrow(munich_clusters)) {
+  cluster_radius <- munich_clusters$radius[i]
+  cluster_color <- "yellow"
+  
+  map <- map %>%
+    addCircles(data = munich_clusters[i, ],
+               radius = cluster_radius,
+               fill = FALSE,
+               color = cluster_color,
+               weight = 2,
+               opacity = 1,
+               popup = ~paste("Cluster ID:", munich_clusters$cluster[i]))
+}
+```
+
+```{r}
+# Add a legend to the map
+map <- map %>%
+  addLegend(
+    position = "bottomright",
+    colors = c("#808080", "#FFFF00"),
+    labels = c("PV Installation with 500m Radius", "Cluster Centroid and Radius"),
+    opacity = 1.0 # Legend opacity
+  )
+```
+
+
+```{r}
+# Output the map
+map
+```
+
+
+

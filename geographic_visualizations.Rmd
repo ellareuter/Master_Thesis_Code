@@ -1,0 +1,277 @@
+---
+title: "geographic_visualizations"
+author: "Ella Reuter"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  eval = TRUE,
+  warning = TRUE,
+  message = F
+)
+```
+
+### Libraries
+
+```{r}
+### Libraries
+library(sf)
+library(sp)
+library(arrow)
+library(stringr)
+library(dplyr)
+library(tidyr)
+library(units)
+library(purrr)
+library(RColorBrewer)
+library(ggplot2)
+library(readr)
+library(leaflet)
+library(osmdata)
+```
+
+```{r}
+#read the pv and parking area data 
+df <- read.csv("~/Desktop/Masterarbeit/data/final_dataset_bigquerie.csv")
+```
+
+### transform coordinates to WG84 of parking areas
+```{r}
+# Create an sf object from the centroid columns
+df_sf <- st_as_sf(df, coords = c("longitude_centroid_parking", "latitude_centroid_parking"), crs = 32632)
+
+# Transform the coordinates to WGS 84
+df_transformed <- st_transform(df_sf, crs = 4326)
+
+# Extract the transformed coordinates back into dataframe
+df$longitude_centroid_parking <- st_coordinates(df_transformed)[, "X"]
+df$latitude_centroid_parking <- st_coordinates(df_transformed)[, "Y"]
+```
+
+```{r}
+city_coords_from_op_str_map <- function(city_name){
+  city_coordinates <- osmdata::getbb(city_name) %>% # Obtain the bounding box corners fro open street map
+    t() %>% 
+    data.frame() %>% 
+    sf::st_as_sf(coords = c("x", "y")) %>%  
+    sf::st_bbox() %>% 
+    sf::st_as_sfc() %>% 
+    sf::st_as_sf() %>% 
+    sf::`st_crs<-`(4326)  
+  
+  city_coordinates %>% 
+    dplyr::mutate(name_of_city = city_name) %>% 
+    dplyr::rename(geometry = x) %>%
+    dplyr::relocate(name_of_city, geometry) %>% 
+    return()
+}
+```
+
+```{r}
+munich <- city_coords_from_op_str_map("Munich")
+```
+
+```{r}
+# Munich is an sf object containing the polygon for Munich
+munich_bbox <- st_bbox(munich)
+```
+
+```{r}
+# Filter the dataframe for points within the Munich bounding box
+df_munich <- df %>%
+  filter(
+    between(Longitude_pv, munich_bbox["xmin"], munich_bbox["xmax"]) &
+    between(Latitude_pv, munich_bbox["ymin"], munich_bbox["ymax"]) |
+    between(longitude_centroid_parking, munich_bbox["xmin"], munich_bbox["xmax"]) &
+    between(latitude_centroid_parking, munich_bbox["ymin"], munich_bbox["ymax"])
+  )
+```
+
+```{r}
+# Convert the filtered data frame to sf objects for mapping
+df_munich_pv <- st_as_sf(df_munich, coords = c("Longitude_pv", "Latitude_pv"), crs = 4326, agr = "constant", remove = FALSE)
+df_munich_parking <- st_as_sf(df_munich, coords = c("longitude_centroid_parking", "latitude_centroid_parking"), crs = 4326, agr = "constant", remove = FALSE)
+```
+
+```{r}
+# Create a leaflet map
+map <- leaflet() %>%
+  addTiles() %>%
+  setView(
+    lng = mean(c(munich_bbox["xmin"], munich_bbox["xmax"])),
+    lat = mean(c(munich_bbox["ymin"], munich_bbox["ymax"])),
+    zoom = 12
+  )
+```
+
+```{r}
+# Add red circle markers for PV installations using the respective longitude and latitude columns
+map <- map %>%
+  addCircleMarkers(
+    data = df_munich_pv,
+    lng = ~Longitude_pv, 
+    lat = ~Latitude_pv, 
+    color = 'darkgray', 
+    radius = 1, 
+    #opacity = 0.5, # Adjusted for transparency
+    fillOpacity = 0.5, # Adjusted for transparency
+    label = ~paste('PV Installation - Lat:', Latitude_pv, 'Lon:', Longitude_pv)
+  ) %>%
+  addCircleMarkers(
+    data = df_munich_parking,
+    lng = ~longitude_centroid_parking, 
+    lat = ~latitude_centroid_parking, 
+    color = 'yellow',
+    radius = 1,
+    #opacity = 0.5, # Adjusted for transparency
+    fillOpacity = 0.5, # Adjusted for transparency
+    label = ~paste('Parking Lot - Lat:', latitude_centroid_parking, 'Lon:', longitude_centroid_parking)
+  )
+```
+
+```{r}
+# Add a legend to the map
+map <- map %>%
+  addLegend(
+    position = "bottomright",
+    colors = c("darkgray", "yellow"),
+    labels = c("PV Installations", "Parking Lots"),
+    opacity = 1.0
+  )
+```
+
+```{r}
+# Create a leaflet map and set the view
+map <- leaflet() %>%
+  addTiles() %>%
+  setView(
+    lng = mean(c(munich_bbox["xmin"], munich_bbox["xmax"])),
+    lat = mean(c(munich_bbox["ymin"], munich_bbox["ymax"])),
+    zoom = 12
+  )
+```
+
+```{r}
+# Add circle markers for parking lots
+map <- map %>%
+  addCircleMarkers(
+    data = df_munich_parking,
+    lng = ~longitude_centroid_parking, 
+    lat = ~latitude_centroid_parking, 
+    color = '#FFFF00', # Hex code for yellow
+    fillColor = '#FFFF00', # Hex code for yellow
+    radius = 2, # Increased radius for better visibility
+    opacity = 0.1, # Adjusted for transparency
+    fillOpacity = 0.1, # Adjusted for transparency
+    label = ~paste('Parking Lot - Lat:', latitude_centroid_parking, 'Lon:', longitude_centroid_parking)
+  )
+```
+
+```{r}
+# Add circle markers for PV installations
+map <- map %>%
+  addCircleMarkers(
+    data = df_munich_pv,
+    lng = ~Longitude_pv, 
+    lat = ~Latitude_pv, 
+    color = '#808080', # Hex code for darkgray
+    fillColor = '#808080', # Hex code for darkgray
+    radius = 2, # Increased radius for better visibility
+    opacity = 0.1, # Adjusted for transparency
+    fillOpacity = 0.1, # Adjusted for transparency
+    label = ~paste('PV Installation - Lat:', Latitude_pv, 'Lon:', Longitude_pv)
+  )
+```
+
+```{r}
+# Add a legend to the map
+map <- map %>%
+  addLegend(
+    position = "bottomright",
+    colors = c("#808080", "#FFFF00"),
+    labels = c("PV Installations", "Parking Lots"),
+    opacity = 1.0 # Legend opacity
+  )
+```
+
+```{r}
+map
+```
+
+
+```{r}
+df_munich_u100 <- df_munich %>% filter(distance <= 100)
+```
+
+```{r}
+# Convert the filtered data frame to sf objects for mapping
+df_munich_pv_u100 <- st_as_sf(df_munich_u100, coords = c("Longitude_pv", "Latitude_pv"), crs = 4326, agr = "constant", remove = FALSE)
+df_munich_parking_u100 <- st_as_sf(df_munich_u100, coords = c("longitude_centroid_parking", "latitude_centroid_parking"), crs = 4326, agr = "constant", remove = FALSE)
+```
+
+```{r}
+# Create a leaflet map
+map <- leaflet() %>%
+  addTiles() %>%
+  setView(
+    lng = mean(c(munich_bbox["xmin"], munich_bbox["xmax"])),
+    lat = mean(c(munich_bbox["ymin"], munich_bbox["ymax"])),
+    zoom = 12
+  )
+```
+
+```{r}
+# Add circle markers for PV installations
+map <- map %>%
+  addCircleMarkers(
+    data = df_munich_pv_u100,
+    lng = ~Longitude_pv, 
+    lat = ~Latitude_pv, 
+    color = '#808080', # Hex code for darkgray
+    fillColor = '#808080', # Hex code for darkgray
+    radius = 3, # Increased radius for better visibility
+    opacity = 1, # Adjusted for transparency
+    fillOpacity = 1, # Adjusted for transparency
+    label = ~paste('PV Installation - Lat:', Latitude_pv, 'Lon:', Longitude_pv)
+  )
+```
+
+```{r}
+# Add circle markers for parking lots
+map <- map %>%
+  addCircleMarkers(
+    data = df_munich_pv_u100,
+    lng = ~longitude_centroid_parking, 
+    lat = ~latitude_centroid_parking, 
+    color = '#FFFF00', # Hex code for yellow
+    fillColor = '#FFFF00', # Hex code for yellow
+    radius = 3, # Increased radius for better visibility
+    opacity = 0.1, # Adjusted for transparency
+    fillOpacity = 0.1, # Adjusted for transparency
+    label = ~paste('Parking Lot - Lat:', latitude_centroid_parking, 'Lon:', longitude_centroid_parking)
+  )
+```
+
+```{r}
+# Add a legend to the map
+map <- map %>%
+  addLegend(
+    position = "bottomright",
+    colors = c("#808080", "#FFFF00"),
+    labels = c("PV Installations", "Parking Lots"),
+    opacity = 1.0 # Legend opacity
+  )
+```
+
+```{r}
+map
+```
+
+
+
+
+
+

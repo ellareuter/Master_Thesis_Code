@@ -1,0 +1,145 @@
+---
+title: "Spatial_computation_table"
+author: "Ella Reuter"
+date: "`r Sys.Date()`"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  eval = TRUE,
+  warning = TRUE,
+  message = F
+)
+```
+
+### Libraries
+
+```{r}
+### Libraries
+library(sf)
+library(sp)
+library(arrow)
+library(stringr)
+library(dplyr)
+library(tidyr)
+library(units)
+library(purrr)
+library(RColorBrewer)
+library(ggplot2)
+library(readr)
+library(microbenchmark)
+library(knitr)
+library(kableExtra)
+library(xtable)
+library(Hmisc)
+```
+
+```{r}
+#read the pv and parking area data 
+df_pv <- arrow::read_parquet("~/Desktop/Masterarbeit/data/export_benetza_pv.parquet")
+df_parking <- st_read("~/Desktop/Masterarbeit/data/osm_parking_areas_in_germany.gpkg")
+```
+
+
+```{r}
+# Check the data type of each column
+column_types <- sapply(df_pv, class)
+
+# Print the data types
+print(column_types)
+```
+
+```{r}
+#Selecting and renaming columns
+df_pv <- df_pv %>%
+  select(MaStR_Nr = `MaStR-Nr. der Einheit`, 
+         Latitude = `Koordinate: Breitengrad (WGS84)`, 
+         Longitude = `Koordinate: Längengrad (WGS84)`)
+```
+
+```{r}
+#Replace comma with period and convert to numeric
+df_pv$Latitude <- as.numeric(str_replace(df_pv$Latitude, ",", "."))
+df_pv$Longitude <- as.numeric(str_replace(df_pv$Longitude, ",", "."))
+```
+
+```{r}
+#Convert pv_installations dataframe to an sf object
+df_pv <- st_as_sf(df_pv, coords = c("Longitude", "Latitude"), crs = 4326)  
+df_pv <- st_transform(df_pv, 32632) 
+```
+
+```{r}
+# Convert df_parking to an sf object
+df_parking <- st_transform(df_parking, 32632) 
+```
+
+```{r}
+# Subset and compute function
+subset_and_compute <- function(pv_size, parking_size) {
+  subset_pv <- df_pv[sample(nrow(df_pv), size = pv_size), ]
+  subset_parking <- df_parking[sample(nrow(df_parking), size = parking_size), ]
+  
+  # spatial computation
+  result <- st_distance(subset_pv, subset_parking)
+  
+  return(result)
+}
+```
+
+```{r}
+# Function to measure mean time of multiple runs
+measure_mean_time <- function(pv_size, parking_size, n_runs) {
+  times <- numeric(n_runs)
+  for (i in 1:n_runs) {
+    times[i] <- system.time(subset_and_compute(pv_size, parking_size))[3]
+  }
+  mean_time <- mean(times)
+  return(mean_time)
+}
+```
+
+```{r}
+# Measure mean time for each scenario
+mean_time_1 <- measure_mean_time(1, 10, 10)
+mean_time_2 <- measure_mean_time(10, 100, 10)
+mean_time_3 <- measure_mean_time(100, 10000, 10)
+mean_time_4 <- measure_mean_time(1000, 100000, 10)
+```
+
+```{r}
+# Create a dataframe for computing times
+computing_times <- data.frame(
+  Scenario = c(1, 2, 3, 4),
+  PV_Size = c(1, 10, 100, 1000),
+  Parking_Size = c(10, 100, 1000, 100000),
+  Mean_Time = c(mean_time_1, mean_time_2, mean_time_3, mean_time_4)
+)
+```
+
+```{r}
+# Print the dataframe
+print(computing_times)
+```
+```{r}
+# Format the numbers to include commas for thousands
+computing_times$PV_Size <- formatC(computing_times$PV_Size, format = "f", big.mark = ",")
+computing_times$Parking_Size <- formatC(computing_times$Parking_Size, format = "f", big.mark = ",")
+computing_times$Mean_Time <- formatC(computing_times$Mean_Time, format = "f", big.mark = ",")
+```
+
+```{r}
+# Generate the LaTeX code for the table
+latex_table <- xtable(computing_times, caption = "Computing Times", label = "table:computing_times")
+```
+
+```{r}
+# Customize the table to look like the one in your image
+print(latex_table, include.rownames = FALSE, hline.after = c(-1, 0, nrow(computing_times)),
+      caption.placement = "top", floating = TRUE,
+      add.to.row = list(pos = list(-1),
+                        command = "\\rowcolor[gray]{0.9} "),
+      sanitize.text.function = function(x){x})
+```
+

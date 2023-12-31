@@ -1,0 +1,504 @@
+---
+title: "Final_dataset_compiling"
+author: "Ella Reuter"
+date: "`r Sys.Date()`"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  eval = TRUE,
+  warning = TRUE,
+  message = F
+)
+```
+
+### Libraries
+
+```{r}
+### Libraries
+library(sf)
+library(sp)
+library(arrow)
+library(stringr)
+library(dplyr)
+library(tidyr)
+library(units)
+library(purrr)
+library(RColorBrewer)
+library(ggplot2)
+library(readr)
+library(xtable)
+library(purrr)
+library(knitr)
+library(kableExtra)
+library(scales)
+```
+
+```{r}
+#read the pv and parking area data 
+df_pv <- arrow::read_parquet("~/Desktop/Masterarbeit/data/export_benetza_pv.parquet")
+df_csv <- read.csv("~/Desktop/Masterarbeit/data/osm_parking_data_fetching.csv")
+```
+
+### Combine all distances parquets together
+
+```{r}
+# Create an empty list to store the dataframes
+dfs <- list()
+```
+
+```{r}
+# Loop through numbers from 1 to 10 and read the distance parquet files
+for (i in 1:10) {
+  file_path <- sprintf("~/Desktop/Masterarbeit/distance_computations/pv_to_parking_distance_%d.parquet", i)
+  df <- arrow::read_parquet(file_path)
+  dfs[[i]] <- df
+}
+```
+
+```{r}
+# Combine all dataframes into one
+distances <- dplyr::bind_rows(dfs)
+```
+
+```{r}
+nrow(distances)
+```
+
+```{r}
+distances$distance <- as.numeric(distances$distance)
+```
+
+```{r}
+distances_filtered <- distances[distances$distance < 500, ]
+```
+
+```{r}
+nrow(distances_filtered)
+```
+
+```{r}
+write_parquet(distances_filtered, "~/Desktop/Masterarbeit/distance_computations/distances_merged.parquet")
+```
+
+```{r}
+distances_filtered <- arrow::read_parquet("~/Desktop/Masterarbeit/distance_computations/distances_merged.parquet")
+```
+
+### Matching all datasets together for Looker Studio
+```{r}
+# Check the data type of each column
+column_types <- sapply(df_csv, class)
+
+# Print the data types
+print(column_types)
+```
+```{r}
+# Check the data type of each column
+column_types <- sapply(distances_filtered, class)
+
+# Print the data types
+print(column_types)
+```
+
+```{r}
+# Merge distances_filtered with df_pv
+merged_df_1 <- merge(distances_filtered, df_pv, by.x = "pv_id", by.y = "MaStR-Nr. der Einheit")
+```
+
+```{r}
+# Merge merged_df_1 with parking df
+final_dataset <- merge(merged_df_1, df_csv, by.x = "parking_id", by.y = "ID")
+```
+
+### Remove unnecessary columns
+```{r}
+# Remove the “cluster” and “Vertices” column
+final_dataset <- final_dataset %>% select(-cluster, -Vertices, - Date_of_Final_Decommissioning,- "Datum der endgültigen Stilllegung")
+```
+
+```{r}
+# Filter out if pv installations is not operating
+final_dataset <- final_dataset %>% filter(`Betriebs-Status` != "Endgültig stillgelegt")
+```
+
+```{r}
+# Check the data type of each column
+column_types <- sapply(final_dataset, class)
+
+# Print the data types
+print(column_types)
+```
+
+```{r}
+# Define a function to replace "Unknown" with NA based on column type
+replace_unknown_with_na <- function(column) {
+  if (is.character(column) || is.factor(column)) {
+    return(na_if(column, "Unknown"))
+  } else if (is.numeric(column)) {
+    column[column == "Unknown"] <- NA
+    return(column)
+  } else {
+    return(column)
+  }
+}
+```
+
+```{r}
+# Apply the function to each column in the dataset
+final_dataset <- final_dataset %>%
+  mutate(across(everything(), replace_unknown_with_na))
+```
+
+```{r}
+# Convert to sf object and calculate centroids
+centroids_df <- final_dataset %>%
+  st_as_sf(wkt = "Geometry") %>%
+  st_set_geometry(st_centroid(st_geometry(.))) %>%
+  mutate(
+    longitude_centroid_parking = st_coordinates(.)[,"X"],
+    latitude_centroid_parking = st_coordinates(.)[,"Y"]
+  ) %>%
+  st_set_geometry(NULL)
+```
+
+```{r}
+# Add a temporary ID column for merging, if necessary
+final_dataset$row_id <- 1:nrow(final_dataset)
+centroids_df$row_id <- 1:nrow(centroids_df)
+```
+
+```{r}
+
+# Merge centroid coordinates back
+final_dataset <- merge(final_dataset, centroids_df, by = "row_id")
+```
+
+```{r}
+# Optionally, remove the temporary ID column
+final_dataset$row_id <- NULL
+```
+
+```{r}
+# Compute latitude and longitude centroid for geographical display in Looker Studio
+final_dataset <- final_dataset %>%
+  st_as_sf(wkt = "Geometry") %>%
+  mutate(
+    longitude_centroid_parking = st_coordinates(st_centroid(Geometry))[,"X"],
+    latitude_centroid_parking = st_coordinates(st_centroid(Geometry))[,"Y"]
+  )
+```
+
+```{r}
+# Rename German columns to English
+final_dataset <- final_dataset %>%
+  rename(
+    "Unit_Display_Name" = "Anzeige-Name der Einheit",
+    "Operating_Status" = "Betriebs-Status",
+    "Energy_Source" = "Energieträger",
+    "Gross_Power_of_Unit" = "Bruttoleistung der Einheit",
+    "Net_Rated_Power_of_Unit" = "Nettonennleistung der Einheit",
+    "Unit_Commissioning_Date" = "Inbetriebnahmedatum der Einheit",
+    "Unit_Registration_Date" = "Registrierungsdatum der Einheit",
+    "Federal_State" = "Bundesland",
+    "MaStR_no_of_the_system_operator"= "MaStR-Nr. des Anlagenbetreibers",
+    "Postal_Code" = "Postleitzahl",
+    "Street" = "Straße",
+    "House_Number" = "Hausnummer",
+    "Local_subdistrict" = "Gemarkung",
+    "Parcel" = "Flurstück",
+    "Municipal_Code" = "Gemeindeschlüssel",
+    "Latitude_pv" = "Koordinate: Breitengrad (WGS84)",
+    "Longitude_pv" = "Koordinate: Längengrad (WGS84)",
+    "Number_of_Solar_Modules" = "Anzahl der Solar-Module",
+    "Main_Orientation_of_Solar_Modules" = "Hauptausrichtung der Solar-Module",
+    "Unit_Location" = "Lage der Einheit",
+    "Last_Update" = "Letzte Aktualisierung",
+    "Date_of_Planned_Commissioning" = "Datum der geplanten Inbetriebnahme",
+    "System_Operator_Name" = "Name des Anlagenbetreibers (nur Org.)",
+    "Full_Feed_in_or_Partial_Feed_in" = "Volleinspeisung oder Teileinspeisung",
+    "Name_of_the_Connection_Grid_Operator" = "Name des Anschluss-Netzbetreibers",
+    "MaStR_no_of_the_Connection_Grid_Operator" = "MaStR-Nr. des Anschluss-Netzbetreibers",
+    "Grid_Operator_Check" = "Netzbetreiberprüfung",
+    "Voltage_Level" = "Spannungsebene",
+    "Latitude_parking" = "Latitude",
+    "Longitude_parking" = "Longitude"
+  )
+```
+
+```{r}
+# Specify right order of columns
+desired_order <- c(
+  "distance",
+  "pv_id",
+  "Unit_Display_Name",
+  "Operating_Status",
+  "Energy_Source",
+  "Gross_Power_of_Unit",
+  "Net_Rated_Power_of_Unit",
+  "Unit_Commissioning_Date",
+  "Unit_Registration_Date",
+  "Federal_State",
+  "MaStR_no_of_the_system_operator",
+  "Postal_Code",
+  "Street",
+  "House_Number",
+  "Local_subdistrict",
+  "Parcel",
+  "Municipal_Code",
+  "Latitude_pv",
+  "Longitude_pv",
+  "Number_of_Solar_Modules",
+  "Main_Orientation_of_Solar_Modules",
+  "Unit_Location",
+  "Last_Update",
+  "Date_of_Planned_Commissioning",
+  "System_Operator_Name",
+  "Full_Feed_in_or_Partial_Feed_in",
+  "Name_of_the_Connection_Grid_Operator",
+  "MaStR_no_of_the_Connection_Grid_Operator",
+  "Grid_Operator_Check",
+  "Voltage_Level",
+  "Latitude_parking",
+  "Longitude_parking",
+  "parking_id",
+  "Name",
+  "Parking",
+  "Area_m2",
+  "longitude_centroid_parking",
+  "latitude_centroid_parking",
+  "Latitude_parking",
+  "Longitude_parking",
+  "Capacity",
+  "Capacity.charging",
+  "Fee",
+  "Supervised",
+  "Surface",
+  "Maxstay",
+  "Opening_hours",
+  "Operator",
+  "Website",
+  "Zone",
+  "Capacity.disabled",
+  "Capacity.parent",
+  "Ref",
+  "Park_ride",
+  "Geometry"
+)
+```
+
+```{r}
+# Reorder the columns in the dataframe
+final_dataset <- final_dataset %>%
+  select(desired_order)
+```
+
+```{r}
+# Replace commas with periods
+final_dataset$Longitude_pv <- gsub(",", ".", final_dataset$Longitude_pv) 
+final_dataset$Latitude_pv <- gsub(",", ".", final_dataset$Latitude_pv)
+final_dataset$Gross_Power_of_Unit <- gsub(",", ".", final_dataset$Gross_Power_of_Unit)
+final_dataset$Net_Rated_Power_of_Unit <- gsub(",", ".", final_dataset$Net_Rated_Power_of_Unit)
+```
+
+```{r}
+# Convert the columns
+final_dataset$Longitude_pv <- as.numeric(final_dataset$Longitude_pv)
+final_dataset$Latitude_pv <- as.numeric(final_dataset$Latitude_pv)
+final_dataset$Gross_Power_of_Unit <- as.numeric(final_dataset$Gross_Power_of_Unit)
+final_dataset$Net_Rated_Power_of_Unit <- as.numeric(final_dataset$Net_Rated_Power_of_Unit)
+final_dataset$Postal_Code <- as.integer(final_dataset$Postal_Code)
+final_dataset$Capacity <- as.integer(final_dataset$Capacity)
+final_dataset$Geometry <- st_as_text(final_dataset$Geometry)
+final_dataset$Municipal_Code <- as.integer(final_dataset$Municipal_Code)
+final_dataset$parking_id <- as.character(final_dataset$parking_id)
+```
+
+```{r}
+final_dataset$Geometry <- st_as_text(final_dataset$Geometry)
+```
+
+```{r}
+# Check the data type of each column
+column_types <- sapply(final_dataset, class)
+
+# Print the data types
+print(column_types)
+```
+
+### convert all dates
+```{r}
+# Convert and reformat the date
+final_dataset$Unit_Registration_Date <- as.Date(final_dataset$Unit_Registration_Date, format = "%d/%m/%Y")
+final_dataset$Unit_Registration_Date <- format(final_dataset$Unit_Registration_Date, "%Y-%m-%d")
+```
+
+```{r}
+final_dataset$Date_of_Planned_Commissioning <- as.Date(final_dataset$Date_of_Planned_Commissioning, format = "%d/%m/%Y")
+final_dataset$Date_of_Planned_Commissioning <- format(final_dataset$Date_of_Planned_Commissioning, "%Y-%m-%d")
+```
+
+```{r}
+final_dataset$Unit_Commissioning_Date <- as.Date(final_dataset$Unit_Commissioning_Date, format = "%d/%m/%Y")
+final_dataset$Unit_Commissioning_Date <- format(final_dataset$Unit_Commissioning_Date, "%Y-%m-%d")
+```
+
+```{r}
+final_dataset$Last_Update <- as.Date(final_dataset$Last_Update, format = "%d/%m/%Y")
+final_dataset$Last_Update <- format(final_dataset$Last_Update, "%Y-%m-%d")
+```
+
+```{r}
+final_dataset$Date_of_Final_Decommissioning <- as.Date(final_dataset$Date_of_Final_Decommissioning, format = "%d/%m/%Y")
+final_dataset$Date_of_Final_Decommissioning <- format(final_dataset$Date_of_Final_Decommissioning, "%Y-%m-%d")
+```
+
+```{r}
+final_dataset$Unit_Registration_Date <- as.Date(final_dataset$Unit_Registration_Date, format = "%Y-%m-%d")
+final_dataset$Date_of_Planned_Commissioning <- as.Date(final_dataset$Date_of_Planned_Commissioning, format = "%Y-%m-%d")
+final_dataset$Unit_Commissioning_Date <- as.Date(final_dataset$Unit_Commissioning_Date, format = "%Y-%m-%d")
+final_dataset$Last_Update <- as.Date(final_dataset$Last_Update, format = "%Y-%m-%d")
+final_dataset$Date_of_Final_Decommissioning <- as.Date(final_dataset$Date_of_Final_Decommissioning, format = "%Y-%m-%d")
+```
+
+```{r}
+# Replacing NA values with empty strings in date columns
+final_dataset$Unit_Registration_Date <- ifelse(is.na(final_dataset$Unit_Registration_Date), "", final_dataset$Unit_Registration_Date)
+final_dataset$Date_of_Planned_Commissioning <- ifelse(is.na(final_dataset$Date_of_Planned_Commissioning), "", final_dataset$Date_of_Planned_Commissioning)
+final_dataset$Unit_Commissioning_Date <- ifelse(is.na(final_dataset$Unit_Commissioning_Date), "", final_dataset$Unit_Commissioning_Date)
+final_dataset$Last_Update <- ifelse(is.na(final_dataset$Last_Update), "", final_dataset$Last_Update)
+final_dataset$Date_of_Final_Decommissioning <- ifelse(is.na(final_dataset$Date_of_Final_Decommissioning), "", final_dataset$Date_of_Final_Decommissioning)
+```
+
+```{r}
+# Export dataframe to CSV
+write.csv(final_dataset, "~/Desktop/Masterarbeit/data/final_dataset_bigquerie.csv", row.names = FALSE, na = "")
+```
+
+```{r}
+distances_filtered_u50 <- distances_filtered[distances_filtered$distance < 50, ]
+```
+
+```{r}
+nrow(distances_filtered_u50)
+```
+
+### Exploration of final dataset
+```{r}
+df <- read.csv("~/Desktop/Masterarbeit/data/final_dataset_bigquerie.csv")
+```
+
+```{r}
+# Function to generate summary for one column
+summarize_column <- function(column, column_name) {
+  # Replace empty strings with NA for summarization
+  column <- ifelse(column == "", NA, column)
+  
+  data.frame(
+    Column_name = column_name,
+    DataType = class(column)[1],
+    Non_null_Values = sum(!is.na(column)),
+    Unique_Values = n_distinct(column, na.rm = TRUE),
+    NaN_Values = sum(is.na(column))
+  )
+}
+```
+
+```{r}
+# Generate the summary for all columns, using the actual column names
+summary_df <- map_dfr(names(df), 
+                      ~summarize_column(df[[.]], .x),
+                      .id = NULL)
+```
+
+```{r}
+# Sanitize column names for LaTeX
+sanitize_column_name <- function(name) {
+  # Escape underscores and other special characters
+  return(gsub("_", "\\_", name, fixed = TRUE))
+}
+```
+
+```{r}
+# Apply the sanitization function to column names
+bold_headers <- sapply(names(summary_df), sanitize_column_name)
+bold_headers <- paste("\\textbf{", bold_headers, "}", sep = "")
+```
+
+```{r}
+# Apply the sanitization function to the 'Column_name' entries and make them bold
+summary_df <- summary_df %>%
+  mutate(Column_name = paste0("\\textbf{", sapply(Column_name, sanitize_column_name), "}"))
+```
+
+```{r}
+# Create the LaTeX table with kable and apply styling with kableExtra
+latex_table <- kable(summary_df, "latex", booktabs = TRUE, escape = FALSE, col.names = bold_headers) %>%
+  kable_styling(latex_options = c("striped", "hold_position")) %>%
+  add_header_above(c(" " = 1, "Summary of DataFrame" = ncol(summary_df) - 1)) %>%
+  column_spec(1, bold = TRUE) 
+```
+
+```{r}
+# Save the table to a .tex file
+save_kable(latex_table, "summary_table.tex")
+```
+
+```{r}
+# Number of unique parking IDs
+num_unique_parking_ids <- length(unique(df$parking_id))
+cat("Number of unique parking IDs:", num_unique_parking_ids, "\n")
+```
+
+```{r}
+# Number of unique PV installations
+num_unique_pv_ids <- length(unique(df$pv_id))
+cat("Number of unique PV installations:", num_unique_pv_ids, "\n")
+```
+
+### Vizualization of the distances below 500 meters
+
+```{r}
+# Create the plot and store it in variable 'g'
+g <- ggplot(df, aes(x = distance, fill = ..count..)) +
+  geom_histogram(binwidth = 25, color = "white", boundary = 0) +
+  scale_x_continuous(breaks = seq(0, 500, by = 50)) +
+  labs(
+    x = "Distance (meters)",
+    y = "Count of Parking Areas to PV Installations (k)"
+  ) +
+  scale_fill_gradient(low = "#808080", high = "yellow") + # Custom grey to yellow gradient
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+    legend.title = element_blank(),
+    panel.background = element_rect(fill = "white", colour = NA),
+    plot.background = element_rect(fill = "white", colour = NA),
+    # Set white background
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(size = 15), 
+    axis.text.y = element_text(size = 15),
+    legend.position = "none"
+  ) +
+  scale_y_continuous(labels = comma_format(scale = 1e-3))
+```
+
+```{r}
+g
+```
+
+```{r}
+# Save the plot with ggsave
+ggsave("plot_distribution_distances_1.png", g, width = 10, height = 6)
+```
+
+```{r}
+# Count of unique PV installations
+num_pv_installations <- length(unique(df_munich_parking$pv_id))
+
+# Count of unique parking areas
+num_parking_areas <- length(unique(df_munich_parking$parking_id))
+```
+

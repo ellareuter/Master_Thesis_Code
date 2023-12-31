@@ -1,0 +1,201 @@
+---
+title: "Distance_clustering_master_final"
+author: "Ella Reuter"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  eval = TRUE,
+  warning = TRUE,
+  message = F
+)
+```
+
+### Libraries
+
+```{r}
+### Libraries
+library(sf)
+library(sp)
+library(arrow)
+library(stringr)
+library(dplyr)
+library(tidyr)
+library(units)
+library(purrr)
+```
+
+### Data loading
+
+```{r}
+#read the data
+df_pv <- arrow::read_parquet("~/Desktop/Masterarbeit/data/export_benetza_pv.parquet")
+parking_lots <- st_read("~/Desktop/Masterarbeit/data/osm_parking_areas_in_germany.gpkg")
+```
+
+
+### Data Cleaning and Preparation
+
+```{r}
+# Renaming columns for clarity and converting data types
+pv_installations <- df_pv %>%
+  select(MaStR_Nr = `MaStR-Nr. der Einheit`, 
+         Latitude = `Koordinate: Breitengrad (WGS84)`, 
+         Longitude = `Koordinate: Längengrad (WGS84)`) %>%
+  mutate(Latitude = as.numeric(str_replace(Latitude, ",", ".")),
+         Longitude = as.numeric(str_replace(Longitude, ",", ".")))
+```
+
+```{r}
+# Converting the cleaned data into an sf object with appropriate CRS.
+pv_installations <- st_as_sf(pv_installations, coords = c("Longitude", "Latitude"), crs = 4326) %>%
+  st_transform(crs = 32632) 
+```
+
+```{r}
+# Ensure that parking lots data is in the same coordinate reference system (CRS)
+gdf_parking_lots <- st_transform(parking_lots, 32632)
+```
+
+
+### Deviding parking data into 10 subsets
+```{r}
+# Number of parts to split into
+num_parts <- 10
+```
+
+```{r}
+# Create a sequence of numbers from 1 to num_parts, repeated along the rows of your dataframe
+partition_ids <- (seq_len(nrow(gdf_parking_lots)) - 1) %% num_parts + 1
+```
+
+```{r}
+# Split the dataframe into a list of dataframes based on partition_ids
+split_parking_data <- split(gdf_parking_lots, partition_ids)
+```
+
+```{r}
+gdf_parking_10 <- split_parking_data[[10]]
+```
+
+```{r}
+# Assign each part to its own dataframe
+gdf_parking_1 <- split_parking_data[[1]]
+gdf_parking_2 <- split_parking_data[[2]]
+gdf_parking_3 <- split_parking_data[[3]]
+gdf_parking_4 <- split_parking_data[[4]]
+gdf_parking_5 <- split_parking_data[[5]]
+gdf_parking_6 <- split_parking_data[[6]]
+gdf_parking_7 <- split_parking_data[[7]]
+gdf_parking_8 <- split_parking_data[[8]]
+gdf_parking_9 <- split_parking_data[[9]]
+gdf_parking_10 <- split_parking_data[[10]]
+```
+
+```{r}
+gdf_parking_lots <- gdf_parking_10
+```
+
+### K-means Clustering of Parking lots
+
+```{r}
+### Data Cleaning and Preparation
+num_clusters_pl <- 5000
+```
+
+```{r}
+gdf_parking_lots_centroids <- st_centroid(gdf_parking_lots$geom)
+```
+
+```{r}
+# Run k-means on the coordinates
+set.seed(123)
+coordinates_pl <- st_coordinates(gdf_parking_lots_centroids)
+kmeans_result_parking_lots <- kmeans(coordinates_pl, centers = num_clusters_pl)
+```
+
+```{r}
+# Add the cluster number to the original PV installations data
+gdf_parking_lots$cluster <- kmeans_result_parking_lots$cluster 
+```
+
+### Compute Cluster Information
+```{r}
+# Compute cluster information 
+cluster_info <- gdf_parking_lots %>% 
+  group_by(cluster) %>% 
+  summarise(
+    centroid = st_centroid(st_union(geom)),
+    radius = max(st_distance(geom, st_centroid(st_union(geom)))),
+    count = n(),
+    .groups = 'keep'  
+  )
+```
+
+```{r}
+# Maximum Distance
+max_distance <- set_units(500, "meters") 
+```
+
+```{r}
+# Precompute Distances for Clusters
+pv_distances_to_clusters <- st_distance(pv_installations, cluster_info$centroid)
+close_clusters <- pv_distances_to_clusters <= max_distance + cluster_info$radius
+```
+
+```{r}
+# Detailed Distance Computation for Nearby Clusters
+results <- vector("list", nrow(pv_installations))
+
+for (i in seq_len(nrow(pv_installations))) {
+  pv <- pv_installations[i, ]
+  nearby_clusters <- which(close_clusters[i, ])
+  
+  for (cluster_id in nearby_clusters) {
+    parking_lots_in_cluster <- gdf_parking_lots[gdf_parking_lots$cluster == cluster_id, ]
+    distances <- st_distance(pv, parking_lots_in_cluster)
+    within_km <- distances <= max_distance
+    
+    if (any(within_km)) {
+      results[[i]] <- rbind(results[[i]], data.frame(
+        pv_id = pv$MaStR_Nr,
+        parking_id = parking_lots_in_cluster$ID[within_km],
+        cluster = cluster_id,
+        distance = distances[within_km]
+      ))
+    }
+  }
+}
+
+```
+
+```{r}
+# Final Data Compilation
+final_results <- do.call(rbind, results)
+```
+
+```{r}
+# Store the data
+write_parquet(final_results, "~/Desktop/Masterarbeit/distance_computations/pv_to_parking_distance_1.parquet")
+write_parquet(final_results, "~/Desktop/Masterarbeit/distance_computations/pv_to_parking_distance_2.parquet")
+write_parquet(final_results, "~/Desktop/Masterarbeit/distance_computations/pv_to_parking_distance_3.parquet")
+write_parquet(final_results, "~/Desktop/Masterarbeit/distance_computations/pv_to_parking_distance_4.parquet")
+write_parquet(final_results, "~/Desktop/Masterarbeit/distance_computations/pv_to_parking_distance_5.parquet")
+write_parquet(final_results, "~/Desktop/Masterarbeit/distance_computations/pv_to_parking_distance_6.parquet")
+write_parquet(final_results, "~/Desktop/Masterarbeit/distance_computations/pv_to_parking_distance_7.parquet")
+write_parquet(final_results, "~/Desktop/Masterarbeit/distance_computations/pv_to_parking_distance_8.parquet")
+write_parquet(final_results, "~/Desktop/Masterarbeit/distance_computations/pv_to_parking_distance_9.parquet")
+write_parquet(final_results, "~/Desktop/Masterarbeit/distance_computations/pv_to_parking_distance_10.parquet")
+```
+
+
+
+
+
+
+
+
+

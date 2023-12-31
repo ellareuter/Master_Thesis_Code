@@ -1,0 +1,213 @@
+---
+title: "Clustering_visualization"
+author: "Ella Reuter"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  eval = TRUE,
+  warning = TRUE,
+  message = F
+)
+```
+
+### Libraries
+
+```{r}
+### Libraries
+library(sf)
+library(sp)
+library(arrow)
+library(stringr)
+library(dplyr)
+library(tidyr)
+library(units)
+library(purrr)
+library(osmdata)
+library(RColorBrewer)
+library(ggplot2)
+library(rnaturalearth)
+library(viridis)
+library(ggrepel)
+library(maps)
+```
+
+### Data loading
+
+```{r}
+#read the data
+df_pv <- arrow::read_parquet("~/Desktop/Masterarbeit/data/export_benetza_pv.parquet")
+parking_lots <- st_read("~/Desktop/Masterarbeit/data/osm_parking_areas_in_germany.gpkg")
+```
+
+
+### Data Cleaning and Preparation
+
+```{r}
+# Renaming columns for clarity and converting data types
+pv_installations <- df_pv %>%
+  select(MaStR_Nr = `MaStR-Nr. der Einheit`, 
+         Latitude = `Koordinate: Breitengrad (WGS84)`, 
+         Longitude = `Koordinate: Längengrad (WGS84)`) %>%
+  mutate(Latitude = as.numeric(str_replace(Latitude, ",", ".")),
+         Longitude = as.numeric(str_replace(Longitude, ",", ".")))
+```
+
+```{r}
+# Converting the cleaned data into an sf object with appropriate CRS.
+pv_installations <- st_as_sf(pv_installations, coords = c("Longitude", "Latitude"), crs = 4326) %>%
+  st_transform(crs = 32632) 
+```
+
+```{r}
+# Ensure that parking lots data is in the same coordinate reference system (CRS)
+gdf_parking_lots <- st_transform(parking_lots, 32632)
+```
+
+
+### Deviding parking data into 10 subsets
+```{r}
+# Number of parts to split into
+num_parts <- 10
+```
+
+```{r}
+# Create a sequence of numbers from 1 to num_parts, repeated along the rows of your dataframe
+partition_ids <- (seq_len(nrow(gdf_parking_lots)) - 1) %% num_parts + 1
+```
+
+```{r}
+# Split the dataframe into a list of dataframes based on partition_ids
+split_parking_data <- split(gdf_parking_lots, partition_ids)
+```
+
+```{r}
+gdf_parking_1 <- split_parking_data[[1]]
+```
+
+```{r}
+gdf_parking_lots <- gdf_parking_1
+```
+
+### K-means Clustering of Parking lots
+
+```{r}
+### Data Cleaning and Preparation
+num_clusters_pl <- 1000
+```
+
+```{r}
+gdf_parking_lots_centroids <- st_centroid(gdf_parking_lots$geom)
+```
+
+```{r}
+# Run k-means on the coordinates
+set.seed(123)
+coordinates_pl <- st_coordinates(gdf_parking_lots_centroids)
+kmeans_result_parking_lots <- kmeans(coordinates_pl, centers = num_clusters_pl)
+```
+
+
+```{r}
+# Add the cluster number to the original PV installations data
+gdf_parking_lots$cluster <- kmeans_result_parking_lots$cluster 
+```
+
+```{r}
+# Calculate the count of parking lots in each cluster
+cluster_counts <- gdf_parking_lots %>%
+  st_drop_geometry() %>% 
+  group_by(cluster) %>%
+  summarise(count = n(), .groups = 'drop') 
+```
+
+```{r}
+# Combine the list of sfc_POINT into one sfc object
+points_sfc <- do.call(st_sfc, gdf_parking_lots_centroids)
+```
+
+```{r}
+# Create an sf dataframe from the combined sfc object
+gdf_parking_lots_centroids_sf <- st_sf(geometry = points_sfc)
+```
+
+```{r}
+# Assign CRS
+gdf_parking_lots_centroids_sf <- st_set_crs(gdf_parking_lots_centroids_sf, 32632)
+```
+
+```{r}
+# Add cluster IDs to the centroids
+gdf_parking_lots_centroids_sf$cluster <- gdf_parking_lots$cluster
+```
+
+```{r}
+cluster_polygons <- gdf_parking_lots_centroids_sf %>%
+  group_by(cluster) %>%
+  summarise(geometry = st_combine(geometry)) %>% 
+  st_cast("POLYGON")
+```
+
+
+```{r}
+# Perform a regular join
+cluster_polygons <- merge(cluster_polygons, cluster_counts, by = "cluster", all.x = TRUE)
+```
+
+
+```{r}
+# Total number of parking lots
+total_parking_lots <- sum(cluster_polygons$count)
+```
+
+```{r}
+# Proportion of parking lots per cluster
+cluster_polygons$proportion <- cluster_polygons$count / total_parking_lots
+```
+
+### Get Germany borders and federal states
+
+```{r}
+# Get Germany's borders
+germany <- ne_countries(scale = "medium", country = "Germany", returnclass = "sf")
+```
+
+```{r}
+# Get the borders of German federal states
+german_states <- ne_states(country = "Germany", returnclass = "sf")
+```
+
+```{r}
+# Plotting the map with clusters, state borders, and capital cities
+plot_cluster <- ggplot() +
+  geom_sf(data = cluster_polygons, aes(fill = count), color = NA, alpha = 1) + # Clusters with full color for better contrast
+  geom_sf(data = german_states, fill = NA, color = "black", size = 0.5) + # State borders with thinner lines
+  scale_fill_gradient(low = "azure4", high = "yellow", name = "Parking Lot Density", trans = "sqrt") +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5),
+        plot.background = element_rect(fill = "white"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        legend.key = element_blank(),
+        axis.text = element_blank(), # Remove axis text
+        axis.title = element_blank(), # Remove axis title
+        axis.ticks = element_blank(), # Remove axis ticks
+        legend.text = element_text(size = 10), # Adjust legend text size
+        legend.title.align = 0.5) + # Center align the legend title
+  labs(title = "K-means Clustering of Parking Lots Across Germany", fill = "Parking Lot Density") +
+  guides(fill = guide_colourbar(barwidth = 10, barheight = 1, label.position = "bottom")) # Adjust the bar width and label position
+
+# Display the plot
+print(plot_cluster)
+```
+```{r}
+# Save the plot with ggsave
+ggsave("Plot_K_means_cluster.png", plot = plot_cluster, width = 10, height = 8, units = "in")
+```
+
+
