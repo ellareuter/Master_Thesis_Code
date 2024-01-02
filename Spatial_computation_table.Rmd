@@ -135,7 +135,7 @@ latex_table <- xtable(computing_times, caption = "Computing Times", label = "tab
 ```
 
 ```{r}
-# Customize the table to look like the one in your image
+# Customize the table
 print(latex_table, include.rownames = FALSE, hline.after = c(-1, 0, nrow(computing_times)),
       caption.placement = "top", floating = TRUE,
       add.to.row = list(pos = list(-1),
